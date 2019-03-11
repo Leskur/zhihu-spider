@@ -1,11 +1,14 @@
 from requests.cookies import cookielib
+from urllib.parse import urlencode
 from matplotlib import pyplot
 from PIL import Image
-
 import threading
 import requests
+import execjs
 import getpass
+import hashlib
 import base64
+import hmac
 import json
 import time
 
@@ -28,7 +31,7 @@ class Authorize(object):
 
         self.session = requests.session()
         self.session.headers = {
-            'User-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_14_3) '
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_14_3) '
                           'AppleWebKit/605.1.15 (KHTML, like Gecko) '
                           'Version/12.0.3 Safari/605.1.15'
         }
@@ -80,26 +83,44 @@ class Authorize(object):
                 return True
             print('Cookies 已过期')
 
-            # 输入知乎账号
-            self.check_user_pass()
-            self.login_data.update({
-                'username': self.username,
-                'password': self.password
-            })
+        # 输入知乎账号
+        self.check_user_pass()
+        self.login_data.update({
+            'username': self.username,
+            'password': self.password
+        })
 
-            timestamp = int(time.time() * 1000)
-            self.login_data.update(dict(timestamp=timestamp))
+        timestamp = int(time.time() * 1000)
+        self.login_data.update({
+            'captcha': self.get_captcha(),
+            'timestamp': timestamp,
+            'signature': self.get_signature(timestamp)
+        })
 
-            headers = self.session.headers.copy()
-            headers.update({
-                'x-xsrftoken': self.get_xsrf()
-            })
+        headers = self.session.headers.copy()
+        headers.update({
+            'x-xsrftoken': self.get_xsrf(),
+            'X-Zse-83': '3_1.1',  # 不带该参数会提示：请求参数异常，请升级客户端后重试
+            'Content-Type': 'application/x-www-form-urlencoded'  # 不带该参数会提示："Missing argument grant_type
+        })
 
-            login_api = 'https://www.zhihu.com/api/v3/oauth/sign_in'
+        print(headers)
 
-            self.get_captcha()
-            # resp = self.session.post(login_api, headers=headers)
-            # print(resp.text)
+        login_api = 'https://www.zhihu.com/api/v3/oauth/sign_in'
+
+        encrypt_data = self.encrypt(self.login_data)
+
+        resp = self.session.post(login_api, data=encrypt_data, headers=headers)
+        print(resp.text)
+
+        # 登录失败
+        if 'error' in resp.text:
+            print(resp.json()['error'])
+        if self.check_login():
+            print('登录成功')
+            return True
+        print('登录失败')
+        return False
 
     def check_user_pass(self):
         if not self.username:
@@ -144,6 +165,23 @@ class Authorize(object):
             r = self.session.post(api, data={'input_text': str(capt)})
             print(r.text)
             return capt
+        return ''
+
+    def get_signature(self, timestamp):
+        h = hmac.new(b'd1b964811afb40118a12068ff74a12f4', digestmod=hashlib.sha1)
+        grant_type = self.login_data['grant_type']
+        client_id = self.login_data['client_id']
+        source = self.login_data['source']
+        h.update(bytes((grant_type + client_id + source + str(timestamp)), 'utf-8'))
+        return h.hexdigest()
+
+    @staticmethod
+    def encrypt(form_data: dict):
+        with open('./encrypt.js') as f:
+            js_code = f.read()
+            ctx = execjs.compile(js_code)
+            encrypt_data = ctx.call('Q', urlencode(form_data))
+            return encrypt_data
 
 
 def authorize(username=None, password=None):
